@@ -1,0 +1,30 @@
+#!/bin/zsh
+
+echo "Pruning unused Docker objects..."
+
+# Prune unused containers
+echo "Pruning unused containers..."
+docker container prune -f
+
+# Prune unused images
+echo "Pruning unused images..."
+docker image prune -a -f
+
+# Prune unused volumes
+echo "Pruning unused volumes..."
+docker volume prune -f
+
+# Prune unused networks
+echo "Pruning unused networks..."
+docker network prune -f
+
+# Prune build cache
+echo "Pruning build cache..."
+docker builder prune -f
+
+echo "Docker pruning completed successfully."
+
+# Show docker system df
+echo "Docker disk usage after pruning:"
+docker system df
+
