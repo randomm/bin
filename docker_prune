@@ -20,7 +20,7 @@ docker network prune -f
 
 # Prune build cache
 echo "Pruning build cache..."
-docker builder prune -f
+docker builder prune -a -f
 
 echo "Docker pruning completed successfully."
 
