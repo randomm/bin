@@ -1,30 +1,34 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
+
+# Check if Docker is installed
+if ! command -v docker &> /dev/null; then
+    echo "Docker is not installed or not in PATH. Exiting..."
+    exit 1
+fi
 
 echo "Pruning unused Docker objects..."
 
-# Prune unused containers
-echo "Pruning unused containers..."
-docker container prune -f
+# Confirm with the user before proceeding
+read "response?Are you sure you want to prune all unused Docker data? This action cannot be undone. (y/N): "
+if [[ ! "$response" =~ ^[Yy]$ ]]; then
+    echo "Pruning aborted by the user."
+    exit 0
+fi
 
-# Prune unused images
-echo "Pruning unused images..."
-docker image prune -a -f
+# Set up logging
+LOG_FILE="docker_prune_$(date '+%Y%m%d_%H%M%S').log"
+exec > >(tee -a "$LOG_FILE") 2>&1
 
-# Prune unused volumes
-echo "Pruning unused volumes..."
-docker volume prune -f
+# Prune all unused Docker data
+echo "Pruning all unused Docker data..."
+if ! docker system prune -a --volumes -f; then
+    echo "An error occurred during Docker pruning."
+    exit 1
+fi
 
-# Prune unused networks
-echo "Pruning unused networks..."
-docker network prune -f
+echo "Docker pruning completed successfully. Log saved to $LOG_FILE"
 
-# Prune build cache
-echo "Pruning build cache..."
-docker builder prune -a -f
-
-echo "Docker pruning completed successfully."
-
-# Show docker system df
+# Show detailed Docker system disk usage after pruning
 echo "Docker disk usage after pruning:"
-docker system df
+docker system df -v
 
