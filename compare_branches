@@ -1,4 +1,18 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
+#
+# compare_branches
+#
+# A script to compare two Git branches and display the differences regardless of commit history.
+# It indicates whether commits are merge commits and provides clickable links to the commits on the hosting platform.
+#
+# Author: Your Name
+# License: MIT
+
+# Check if Git is installed
+if ! command -v git &> /dev/null; then
+    echo "Git is not installed or not in PATH. Exiting..."
+    exit 1
+fi
 
 # Function to print in color
 print_color() {
@@ -17,22 +31,39 @@ print_color() {
     esac
 }
 
-# Function to create clickable links
-create_link() {
-    local text=$1
-    local url=$2
-    echo "\033]8;;$url\033\\$text\033]8;;\033\\"
+# Function to log verbose messages
+log() {
+    if [ $verbose -eq 1 ]; then
+        echo "$(print_color 'blue' "$1")"
+    fi
 }
 
-# Function to check if a commit is a merge commit and output a link to GitHub
+# Function to create clickable links based on repo URL
+create_link() {
+    local text=$1
+    local commit_hash=$2
+    local repo_url=$3
+    local commit_url=""
+
+    if [[ "$repo_url" == *"github.com"* ]]; then
+        commit_url="$repo_url/commit/$commit_hash"
+    elif [[ "$repo_url" == *"gitlab.com"* ]]; then
+        commit_url="$repo_url/-/commit/$commit_hash"
+    else
+        commit_url="$repo_url/commit/$commit_hash"
+    fi
+
+    echo "\033]8;;$commit_url\033\\$text\033]8;;\033\\"
+}
+
+# Function to check if a commit is a merge commit
 check_merge_commit() {
     local commit_hash=$1
     local repo_url=$2
-    local commit_url="$repo_url/commit/$commit_hash"
-    if git show --no-patch --pretty=%P $commit_hash | grep -q ' '; then
-        echo "$(print_color 'yellow' "$commit_hash") is a merge commit - $(create_link 'View Commit' $commit_url)"
+    if git show --no-patch --pretty=%P "$commit_hash" | grep -q ' '; then
+        echo "$(print_color 'yellow' "$commit_hash") is a merge commit - $(create_link 'View Commit' "$commit_hash" "$repo_url")"
     else
-        echo "$(print_color 'cyan' "$commit_hash") is not a merge commit - $(create_link 'View Commit' $commit_url)"
+        echo "$(print_color 'cyan' "$commit_hash") is not a merge commit - $(create_link 'View Commit' "$commit_hash" "$repo_url")"
     fi
 }
 
@@ -43,79 +74,88 @@ list_unique_commits() {
     local repo_url=$3
     local output_file=$4
 
-    echo "$(print_color 'bold' "Commits in $compare_branch not in $base_branch:")" > $output_file
-    git cherry $base_branch $compare_branch | grep '^+' | cut -d ' ' -f 2 | while read commit; do
-        check_merge_commit $commit $repo_url >> $output_file
+    echo "$(print_color 'bold' "Commits in $compare_branch not in $base_branch:")" > "$output_file"
+    git cherry "$base_branch" "$compare_branch" | grep '^+' | cut -d ' ' -f 2 | while read -r commit; do
+        check_merge_commit "$commit" "$repo_url" >> "$output_file"
     done
 }
 
-# Verbose flag
+# Parse command line options
 verbose=0
+output_prefix=""
+remote_name=""
 
-# Check for the -v flag
-if [ "$1" = "-v" ]; then
-    verbose=1
-    shift
-fi
+while getopts ":v:o:r:" opt; do
+    case $opt in
+        v) verbose=1 ;;
+        o) output_prefix="$OPTARG" ;;
+        r) remote_name="$OPTARG" ;;
+        \?) echo "Invalid option -$OPTARG" >&2; exit 1 ;;
+    esac
+done
+shift $((OPTIND -1))
 
-# Check if two branch names are provided
-if [ "$#" -ne 2 ]; then
-    echo "Usage: $0 [-v] <branch1> <branch2>"
+# Show usage if not enough arguments
+if [ "$#" -lt 2 ]; then
+    echo "Usage: $0 [-v] [-o output_prefix] [-r remote_name] <branch1> <branch2>"
+    echo
+    echo "Compares two Git branches and displays the commits unique to each."
+    echo
+    echo "Options:"
+    echo "  -v              Enable verbose output"
+    echo "  -o prefix       Specify prefix for output files"
+    echo "  -r remote       Specify remote name (default: origin)"
     exit 1
 fi
 
 branch1=$1
 branch2=$2
 
-# Fetch the repository URL from .git/config
-repo_url=$(git config --get remote.origin.url | sed -e 's/git@github.com:/https:\/\/github.com\//' -e 's/\.git$//')
-
-# Fetch the latest changes
-if [ $verbose -eq 1 ]; then
-    echo "$(print_color 'blue' 'Fetching the latest changes...')"
-    git fetch origin
-else
-    git fetch origin > /dev/null 2>&1
+# Get the default remote name if not specified
+if [ -z "$remote_name" ]; then
+    remote_name=$(git remote | head -n 1)
+    if [ -z "$remote_name" ]; then
+        echo "No remote repository found. Exiting..."
+        exit 1
+    fi
 fi
 
-# Checkout the branches and pull the latest changes
-if [ $verbose -eq 1 ]; then
-    echo "$(print_color 'blue' "Checking out and pulling latest changes for $branch1...")"
-    git checkout $branch1
-    git pull origin $branch1
-else
-    git checkout $branch1 > /dev/null 2>&1
-    git pull origin $branch1 > /dev/null 2>&1
+# Check if branches exist
+if ! git show-ref --quiet refs/heads/"$branch1" && ! git show-ref --quiet refs/remotes/"$remote_name"/"$branch1"; then
+    echo "Branch '$branch1' does not exist locally or on $remote_name. Exiting..."
+    exit 2
 fi
 
-if [ $verbose -eq 1 ]; then
-    echo "$(print_color 'blue' "Checking out and pulling latest changes for $branch2...")"
-    git checkout $branch2
-    git pull origin $branch2
-else
-    git checkout $branch2 > /dev/null 2>&1
-    git pull origin $branch2 > /dev/null 2>&1
+if ! git show-ref --quiet refs/heads/"$branch2" && ! git show-ref --quiet refs/remotes/"$remote_name"/"$branch2"; then
+    echo "Branch '$branch2' does not exist locally or on $remote_name. Exiting..."
+    exit 2
 fi
+
+# Fetch the repository URL
+repo_url=$(git config --get remote."$remote_name".url | sed -e 's/git@/https:\/\//' -e 's/:/\//' -e 's/\.git$//')
+
+# Fetch the latest changes for the specified branches
+log "Fetching the latest changes for $branch1 and $branch2..."
+git fetch "$remote_name" "$branch1:$branch1" "$branch2:$branch2"
+
+# Create secure temporary files
+tmpfile1=$(mktemp "/tmp/unique_to_${branch1}_XXXXXX.txt")
+tmpfile2=$(mktemp "/tmp/unique_to_${branch2}_XXXXXX.txt")
 
 # List unique commits in each branch
-if [ $verbose -eq 1 ]; then
-    echo "$(print_color 'blue' "Listing unique commits in $branch2 not in $branch1...")"
-fi
-list_unique_commits $branch1 $branch2 $repo_url "unique_to_$branch2.txt"
+log "Listing unique commits in $branch2 not in $branch1..."
+list_unique_commits "$branch1" "$branch2" "$repo_url" "$tmpfile2"
 
-if [ $verbose -eq 1 ]; then
-    echo "$(print_color 'blue' "Listing unique commits in $branch1 not in $branch2...")"
-fi
-list_unique_commits $branch2 $branch1 $repo_url "unique_to_$branch1.txt"
+log "Listing unique commits in $branch1 not in $branch2..."
+list_unique_commits "$branch2" "$branch1" "$repo_url" "$tmpfile1"
 
 # Display results
 echo "$(print_color 'bold' '==================================================')"
 echo "$(print_color 'bold' 'Results:')"
-cat "unique_to_$branch2.txt"
+cat "$tmpfile2"
 echo "$(print_color 'bold' '--------------------------------------------------')"
-cat "unique_to_$branch1.txt"
+cat "$tmpfile1"
 echo "$(print_color 'bold' '==================================================')"
 
 # Cleanup
-rm "unique_to_$branch2.txt"
-rm "unique_to_$branch1.txt"
+rm "$tmpfile1" "$tmpfile2"
