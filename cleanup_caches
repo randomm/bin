@@ -1,0 +1,173 @@
+#!/usr/bin/env zsh
+
+set -euo pipefail
+
+confirm() {
+    # $1 = message
+    # usage: confirm "Are you sure?"
+    echo "$1 [y/N]"
+    read -r reply
+    if [[ "$reply" != "y" && "$reply" != "Y" ]]; then
+        echo "Aborted."
+        return 1
+    fi
+    return 0
+}
+
+clear_poetry_cache() {
+    if command -v poetry >/dev/null 2>&1; then
+        POETRY_CACHE_DIR="${HOME}/Library/Caches/pypoetry"
+        if [ -d "$POETRY_CACHE_DIR" ] && [ -n "$(ls -A "$POETRY_CACHE_DIR")" ]; then
+            echo "Poetry cache size:"
+            du -sh "$POETRY_CACHE_DIR"
+            if confirm "Clear Poetry cache?"; then
+                poetry cache clear --all pypi || true
+                rm -rf "$POETRY_CACHE_DIR" 2>/dev/null || true
+                echo "Poetry cache cleared."
+            fi
+        else
+            echo "No Poetry cache directory found or cache is empty."
+        fi
+    else
+        echo "Poetry not found. Skipping."
+    fi
+}
+
+clear_brew_cache() {
+    if command -v brew >/dev/null 2>&1; then
+        BREW_CACHE_DIR="$(brew --cache)"
+        if [ -d "$BREW_CACHE_DIR" ] && [ -n "$(ls -A "$BREW_CACHE_DIR")" ]; then
+            echo "Homebrew cache size:"
+            du -sh "$BREW_CACHE_DIR"
+            if confirm "Clear Homebrew caches with 'brew cleanup' and remove cache directory?"; then
+                brew cleanup
+                rm -rf "$BREW_CACHE_DIR"
+                echo "Homebrew caches cleared."
+            fi
+        else
+            echo "No Homebrew cache directory found or cache is empty."
+        fi
+    else
+        echo "Homebrew not found. Skipping."
+    fi
+}
+
+clear_pip_cache() {
+    if command -v pip >/dev/null 2>&1; then
+        PIP_CACHE_DIR="$(pip cache dir)"
+        if [ -d "$PIP_CACHE_DIR" ] && [ -n "$(ls -A "$PIP_CACHE_DIR")" ]; then
+            echo "pip cache size:"
+            du -sh "$PIP_CACHE_DIR"
+            if confirm "Clear pip cache?"; then
+                pip cache purge
+                echo "pip cache cleared."
+            fi
+        else
+            echo "No pip cache directory found or cache is empty."
+        fi
+    else
+        echo "pip not found. Skipping."
+    fi
+}
+
+clear_pipenv_cache() {
+    if command -v pipenv >/dev/null 2>&1; then
+        PIPENV_CACHE_DIR="${HOME}/.local/share/virtualenvs"
+        if [ -d "$PIPENV_CACHE_DIR" ] && [ -n "$(ls -A "$PIPENV_CACHE_DIR")" ]; then
+            echo "pipenv virtualenvs size:"
+            du -sh "$PIPENV_CACHE_DIR"
+            if confirm "Clear all pipenv virtualenv caches (remove ${PIPENV_CACHE_DIR})?"; then
+                rm -rf "$PIPENV_CACHE_DIR"
+                echo "pipenv caches cleared."
+            fi
+        else
+            echo "No pipenv cache/virtualenv directory found or directory is empty."
+        fi
+    else
+        echo "pipenv not found. Skipping."
+    fi
+}
+
+# Helper function to check if directory is empty (ignoring hidden files)
+is_dir_empty() {
+    local dir="$1"
+    # Count non-hidden files and directories
+    local count=$(find "$dir" -mindepth 1 -not -path '*/\.*' | wc -l)
+    [ "$count" -eq 0 ]
+}
+
+clear_yarn_cache() {
+    if command -v yarn >/dev/null 2>&1; then
+        YARN_CACHE_DIR="$(yarn cache dir 2>/dev/null || true)"
+        if [ -d "$YARN_CACHE_DIR" ]; then
+            if is_dir_empty "$YARN_CACHE_DIR"; then
+                echo "Yarn cache is empty."
+            else
+                echo "Yarn cache size:"
+                du -sh "$YARN_CACHE_DIR"
+                if confirm "Clear Yarn cache?"; then
+                    yarn cache clean
+                    echo "Yarn cache cleared."
+                fi
+            fi
+        else
+            echo "No Yarn cache directory found."
+        fi
+    else
+        echo "yarn not found. Skipping."
+    fi
+}
+
+clear_npm_cache() {
+    if command -v npm >/dev/null 2>&1; then
+        NPM_CACHE_DIR="$(npm config get cache)"
+        if [ -d "$NPM_CACHE_DIR" ]; then
+            if is_dir_empty "$NPM_CACHE_DIR"; then
+                echo "npm cache is empty."
+            else
+                echo "npm cache size:"
+                du -sh "$NPM_CACHE_DIR"
+                if confirm "Clear npm cache?"; then
+                    npm cache clean --force
+                    rm -rf "$NPM_CACHE_DIR"/*
+                    echo "npm cache cleared."
+                fi
+            fi
+        else
+            echo "No npm cache directory found."
+        fi
+    else
+        echo "npm not found. Skipping."
+    fi
+}
+
+clear_cypress_cache() {
+    CYPRESS_CACHE_DIR="${HOME}/Library/Caches/Cypress"
+    if [ -d "$CYPRESS_CACHE_DIR" ] && [ -n "$(ls -A "$CYPRESS_CACHE_DIR")" ]; then
+        echo "Cypress cache size:"
+        du -sh "$CYPRESS_CACHE_DIR"
+        if confirm "Delete Cypress cache directory ($CYPRESS_CACHE_DIR)?"; then
+            rm -rf "$CYPRESS_CACHE_DIR"
+            echo "Cypress cache cleared."
+        fi
+    else
+        echo "No Cypress cache directory found or directory is empty."
+    fi
+}
+
+main() {
+    echo "This script will help you clear various caches on your system."
+    echo "Proceed with caution, as some caches may speed up development or app usage."
+
+    clear_poetry_cache
+    clear_brew_cache
+    clear_pip_cache
+    clear_pipenv_cache
+    clear_yarn_cache
+    clear_npm_cache
+    clear_cypress_cache
+
+    echo "All done."
+}
+
+main "$@"
