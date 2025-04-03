@@ -1,0 +1,53 @@
+#!/usr/bin/env zsh
+
+# Script to completely stop all Docker processes
+
+echo "Preparing to shut down all Docker processes..."
+
+# Confirm with the user before proceeding
+read "response?Are you sure you want to stop all Docker processes? (y/N): "
+if [[ ! "$response" =~ ^[Yy]$ ]]; then
+    echo "Operation aborted by the user."
+    exit 0
+fi
+
+# Set up logging
+LOG_FILE="docker_nuke_$(date '+%Y%m%d_%H%M%S').log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "Stopping Docker Desktop app if running..."
+osascript -e 'tell application "Docker Desktop" to quit' 2>/dev/null || echo "Docker Desktop app not running or couldn't be quit"
+
+echo "Stopping the Docker daemon..."
+killall -TERM com.docker.backend 2>/dev/null || echo "Docker backend not running"
+killall -TERM Docker\ Desktop 2>/dev/null || echo "Docker Desktop not running"
+
+echo "Waiting a moment for graceful shutdown..."
+sleep 2
+
+echo "Forcefully terminating all remaining Docker processes..."
+ps aux | grep docker | grep -v grep | awk '{print $2}' | xargs -I{} kill -9 {} 2>/dev/null || echo "No remaining Docker processes found"
+
+echo "Checking if Docker-related helper processes need to be stopped..."
+killall -9 "Docker Desktop Helper" 2>/dev/null || echo "No Docker Desktop Helper processes found"
+killall -9 "Docker Desktop Helper (Renderer)" 2>/dev/null || echo "No Docker Desktop Helper (Renderer) processes found"
+killall -9 com.docker.build 2>/dev/null || echo "No Docker build processes found"
+killall -9 com.docker.dev-envs 2>/dev/null || echo "No Docker dev-envs processes found"
+
+echo "All Docker processes have been terminated. Log saved to $LOG_FILE"
+echo "You can restart Docker Desktop normally when needed."
+
+# Make root-owned processes require sudo
+if ps aux | grep -q "/Library/PrivilegedHelperTools/com.docker.vmnetd"; then
+    echo "Root-owned Docker helper process (com.docker.vmnetd) detected."
+    echo "To kill this process, run: sudo killall com.docker.vmnetd"
+fi
+
+# Final check
+REMAINING=$(ps aux | grep docker | grep -v grep | wc -l)
+if [ $REMAINING -gt 0 ]; then
+    echo "Warning: $REMAINING Docker-related processes may still be running."
+    echo "To see them, run: ps aux | grep docker"
+else
+    echo "Verification complete: No Docker processes remain running."
+fi
