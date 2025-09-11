@@ -25,13 +25,13 @@ show_help() {
 ytclip - Extract precise audio clips from YouTube videos
 
 USAGE:
-    ytclip URL START END [OPTIONS]
+    ytclip URL [START END] [OPTIONS]
     ytclip --help
 
 ARGUMENTS:
     URL                YouTube video URL
-    START              Start timestamp (format: MM:SS or HH:MM:SS)
-    END                End timestamp (format: MM:SS or HH:MM:SS)
+    START              Start timestamp (format: MM:SS or HH:MM:SS) [optional]
+    END                End timestamp (format: MM:SS or HH:MM:SS) [optional - required if START provided]
 
 OPTIONS:
     -o, --output NAME  Output filename (default: generated from video title)
@@ -41,9 +41,14 @@ OPTIONS:
     -F, --fade-out SEC Fade out duration in seconds (default: 2)
     --no-fade          Disable both fade effects
     --keep-temp        Keep temporary files (for debugging)
+    --cookies FILE     Path to cookies file for authentication
+    --cookies-browser  Extract cookies from browser (chrome/firefox/safari)
     -h, --help         Show this help message
 
 EXAMPLES:
+    # Download entire video as MP3
+    ytclip "https://youtube.com/watch?v=..."
+
     # Basic usage with timestamps
     ytclip "https://youtube.com/watch?v=..." 2:40 3:20
 
@@ -117,6 +122,64 @@ timestamp_to_seconds() {
     echo $seconds
 }
 
+# Function to sanitize filename
+sanitize_filename() {
+    local filename="$1"
+    local max_length=${2:-100}  # Default max length 100 chars
+    
+    # Try iconv for character conversion first if available (more reliable)
+    if command -v iconv &> /dev/null; then
+        filename=$(echo "$filename" | iconv -t ascii//TRANSLIT 2>/dev/null || echo "$filename")
+    fi
+    
+    # Manual conversion for common special characters as fallback
+    filename=$(echo "$filename" | sed 's/ä/ae/g; s/ö/oe/g; s/ü/ue/g; s/Ä/Ae/g; s/Ö/Oe/g; s/Ü/Ue/g')
+    filename=$(echo "$filename" | sed 's/ß/ss/g; s/é/e/g; s/è/e/g; s/ê/e/g; s/ë/e/g')
+    filename=$(echo "$filename" | sed 's/á/a/g; s/à/a/g; s/â/a/g; s/ã/a/g; s/å/a/g')
+    filename=$(echo "$filename" | sed 's/í/i/g; s/ì/i/g; s/î/i/g; s/ï/i/g')
+    filename=$(echo "$filename" | sed 's/ó/o/g; s/ò/o/g; s/ô/o/g; s/õ/o/g; s/ø/o/g')
+    filename=$(echo "$filename" | sed 's/ú/u/g; s/ù/u/g; s/û/u/g')
+    filename=$(echo "$filename" | sed 's/ý/y/g; s/ÿ/y/g; s/ñ/n/g; s/ç/c/g')
+    
+    # Replace filesystem-unsafe characters with underscores
+    filename=$(echo "$filename" | tr '/\\:*?"<>|' '_')
+    
+    # Replace spaces and other problematic chars with underscores
+    filename=$(echo "$filename" | tr ' +&()[]{}' '_')
+    
+    # Collapse multiple underscores into single underscores
+    filename=$(echo "$filename" | sed 's/_\+/_/g')
+    
+    # Remove leading/trailing underscores and dots
+    filename=$(echo "$filename" | sed 's/^[_.]*//; s/[_.]*$//')
+    
+    # Truncate if too long, but preserve extension if present
+    if [[ ${#filename} -gt $max_length ]]; then
+        if [[ "$filename" =~ \.[a-zA-Z0-9]+$ ]]; then
+            # Has extension - preserve it
+            local ext="${filename##*.}"
+            local base="${filename%.*}"
+            local available=$((max_length - ${#ext} - 1))
+            if [[ $available -gt 0 ]]; then
+                filename="${base:0:$available}.${ext}"
+            else
+                # If extension is too long, just truncate everything
+                filename="${filename:0:$max_length}"
+            fi
+        else
+            # No extension - simple truncation
+            filename="${filename:0:$max_length}"
+        fi
+    fi
+    
+    # Ensure it's not empty
+    if [[ -z "$filename" ]]; then
+        filename="audio_clip"
+    fi
+    
+    echo "$filename"
+}
+
 # Function to clean up temp files
 cleanup() {
     if [[ "$CLEANUP" == true ]] && [[ -n "${TEMP_FILE:-}" ]] && [[ -f "$TEMP_FILE" ]]; then
@@ -139,19 +202,35 @@ if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
     exit 0
 fi
 
-if [[ $# -lt 3 ]]; then
+if [[ $# -lt 1 ]]; then
     print_error "Missing required arguments"
-    echo "Usage: ytclip URL START END [OPTIONS]"
+    echo "Usage: ytclip URL [START END] [OPTIONS]"
     echo "Try 'ytclip --help' for more information."
     exit 1
 fi
 
 URL="$1"
-START_TIME="$2"
-END_TIME="$3"
-shift 3
+START_TIME=""
+END_TIME=""
+
+# Check if we have timestamps
+if [[ $# -ge 3 && "$2" =~ ^[0-9]+:[0-9]+(:[0-9]+)?$ ]]; then
+    if [[ $# -lt 3 ]]; then
+        print_error "If START time is provided, END time is also required"
+        echo "Usage: ytclip URL [START END] [OPTIONS]"
+        echo "Try 'ytclip --help' for more information."
+        exit 1
+    fi
+    START_TIME="$2"
+    END_TIME="$3"
+    shift 3
+else
+    shift 1
+fi
 
 OUTPUT_FILE=""
+COOKIES_FILE=""
+COOKIES_BROWSER=""
 
 # Parse optional arguments
 while [[ $# -gt 0 ]]; do
@@ -185,6 +264,14 @@ while [[ $# -gt 0 ]]; do
             CLEANUP=false
             shift
             ;;
+        --cookies)
+            COOKIES_FILE="$2"
+            shift 2
+            ;;
+        --cookies-browser)
+            COOKIES_BROWSER="$2"
+            shift 2
+            ;;
         *)
             print_error "Unknown option: $1"
             echo "Try 'ytclip --help' for more information."
@@ -196,26 +283,57 @@ done
 # Check dependencies
 check_dependencies
 
-# Validate URL
+# Build cookie parameters for yt-dlp
+COOKIE_ARGS=()
+if [[ -n "$COOKIES_FILE" ]]; then
+    COOKIE_ARGS+=(--cookies "$COOKIES_FILE")
+    print_info "Using cookies from file: $COOKIES_FILE"
+elif [[ -n "$COOKIES_BROWSER" ]]; then
+    COOKIE_ARGS+=(--cookies-from-browser "$COOKIES_BROWSER")
+    print_info "Extracting cookies from browser: $COOKIES_BROWSER"
+fi
+
+# Validate and normalize URL
 if [[ ! "$URL" =~ ^https?://(www\.)?(youtube\.com/(watch\?.*v=|live/|embed/|v/|shorts/)|youtu\.be/) ]]; then
     print_error "Invalid YouTube URL format"
     exit 1
 fi
 
-# Convert timestamps to seconds
-START_SEC=$(timestamp_to_seconds "$START_TIME")
-END_SEC=$(timestamp_to_seconds "$END_TIME")
-DURATION=$((END_SEC - START_SEC))
-
-if [[ $DURATION -le 0 ]]; then
-    print_error "End time must be after start time"
-    exit 1
+# Convert live URLs to standard watch URLs for better compatibility  
+if [[ "$URL" =~ "youtube.com/live/" ]]; then
+    VIDEO_ID=$(echo "$URL" | sed 's/.*\/live\///; s/[?&].*//')
+    ORIGINAL_URL="$URL"
+    URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
+    print_info "Converted live stream URL to standard format for better extraction"
+    print_info "Original: $ORIGINAL_URL"
+    print_info "Using: $URL"
+elif [[ "$URL" =~ "youtu.be/" ]]; then
+    VIDEO_ID=$(echo "$URL" | sed 's/.*youtu.be\///; s/[?&].*//')
+    ORIGINAL_URL="$URL"
+    URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
+    print_info "Converted short URL to standard format"
+    print_info "Using: $URL"
 fi
 
-# Validate fade durations
-if [[ $(($FADE_IN + $FADE_OUT)) -ge $DURATION ]]; then
-    print_error "Combined fade durations exceed clip duration"
-    exit 1
+# Convert timestamps to seconds if provided
+if [[ -n "$START_TIME" && -n "$END_TIME" ]]; then
+    START_SEC=$(timestamp_to_seconds "$START_TIME")
+    END_SEC=$(timestamp_to_seconds "$END_TIME")
+    DURATION=$((END_SEC - START_SEC))
+    
+    if [[ $DURATION -le 0 ]]; then
+        print_error "End time must be after start time"
+        exit 1
+    fi
+    
+    # Validate fade durations
+    if [[ $(($FADE_IN + $FADE_OUT)) -ge $DURATION ]]; then
+        print_error "Combined fade durations exceed clip duration"
+        exit 1
+    fi
+    CLIP_MODE=true
+else
+    CLIP_MODE=false
 fi
 
 # Create output directory if needed
@@ -223,11 +341,54 @@ if [[ ! -d "$OUTPUT_DIR" ]]; then
     mkdir -p "$OUTPUT_DIR"
 fi
 
-# Get video title if output name not specified
-if [[ -z "$OUTPUT_FILE" ]]; then
-    print_info "Fetching video title..."
-    VIDEO_TITLE=$(yt-dlp --get-title "$URL" 2>/dev/null | tr '/\\:*?"<>|' '_' | tr ' ' '_')
-    OUTPUT_FILE="${VIDEO_TITLE}_${START_TIME//:/}-${END_TIME//:/}.mp3"
+# Get video info if output name not specified or for duration check
+if [[ -z "$OUTPUT_FILE" ]] || [[ "$CLIP_MODE" == false ]]; then
+    print_info "Fetching video information..."
+    VIDEO_TITLE_RAW=$(yt-dlp --get-title "$URL" 2>/dev/null)
+    
+    # Get video duration to warn about long videos
+    if [[ "$CLIP_MODE" == false ]]; then
+        VIDEO_DURATION_STR=$(yt-dlp --get-duration "$URL" 2>/dev/null)
+        if [[ -n "$VIDEO_DURATION_STR" ]]; then
+            # Parse duration and convert to seconds for comparison
+            if [[ "$VIDEO_DURATION_STR" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+                # HH:MM:SS format
+                VIDEO_DURATION_SEC=$((${BASH_REMATCH[1]} * 3600 + ${BASH_REMATCH[2]} * 60 + ${BASH_REMATCH[3]}))
+            elif [[ "$VIDEO_DURATION_STR" =~ ^([0-9]+):([0-9]+)$ ]]; then
+                # MM:SS format
+                VIDEO_DURATION_SEC=$((${BASH_REMATCH[1]} * 60 + ${BASH_REMATCH[2]}))
+            else
+                VIDEO_DURATION_SEC=0
+            fi
+            
+            # Warn if video is longer than 30 minutes (1800 seconds)
+            if [[ $VIDEO_DURATION_SEC -gt 1800 ]]; then
+                echo -e "${YELLOW}⚠️  Warning: This video is ${VIDEO_DURATION_STR} long and will take significant time to download.${NC}"
+                echo -e "${YELLOW}   Consider specifying start/end timestamps to extract just the segment you need.${NC}"
+                echo -n "Continue with full video download? [y/N]: "
+                read -r response
+                if [[ ! "$response" =~ ^[Yy]$ ]]; then
+                    print_info "Download cancelled by user."
+                    exit 0
+                fi
+            fi
+        fi
+    fi
+    
+    if [[ -z "$OUTPUT_FILE" ]]; then
+        VIDEO_TITLE=$(sanitize_filename "$VIDEO_TITLE_RAW" 80)  # Limit to 80 chars for base name
+        if [[ "$CLIP_MODE" == true ]]; then
+            TIMESTAMP_SUFFIX="_${START_TIME//:/}-${END_TIME//:/}"
+            OUTPUT_FILE="${VIDEO_TITLE}${TIMESTAMP_SUFFIX}.mp3"
+        else
+            OUTPUT_FILE="${VIDEO_TITLE}.mp3"
+        fi
+    fi
+fi
+
+# Sanitize user-provided filename if needed
+if [[ -n "$OUTPUT_FILE" ]]; then
+    OUTPUT_FILE=$(sanitize_filename "$OUTPUT_FILE" 120)
 fi
 
 # Ensure .mp3 extension
@@ -237,87 +398,112 @@ fi
 
 FULL_OUTPUT_PATH="${OUTPUT_DIR}/${OUTPUT_FILE}"
 
-# Calculate download range with buffer
-DOWNLOAD_START=$((START_SEC - BUFFER_SECONDS))
-if [[ $DOWNLOAD_START -lt 0 ]]; then
-    DOWNLOAD_START=0
-    BUFFER_ADJUSTMENT=$START_SEC
-else
-    BUFFER_ADJUSTMENT=$BUFFER_SECONDS
-fi
-DOWNLOAD_END=$((END_SEC + BUFFER_SECONDS))
-
-# Convert back to timestamp format for yt-dlp
-format_seconds() {
-    local total_seconds=$1
-    local hours=$((total_seconds / 3600))
-    local minutes=$(((total_seconds % 3600) / 60))
-    local seconds=$((total_seconds % 60))
+# Calculate download parameters based on mode
+if [[ "$CLIP_MODE" == true ]]; then
+    # Calculate download range with buffer for clipping
+    DOWNLOAD_START=$((START_SEC - BUFFER_SECONDS))
+    if [[ $DOWNLOAD_START -lt 0 ]]; then
+        DOWNLOAD_START=0
+        BUFFER_ADJUSTMENT=$START_SEC
+    else
+        BUFFER_ADJUSTMENT=$BUFFER_SECONDS
+    fi
+    DOWNLOAD_END=$((END_SEC + BUFFER_SECONDS))
     
-    if [[ $hours -gt 0 ]]; then
-        printf "%d:%02d:%02d" $hours $minutes $seconds
+    # Convert back to timestamp format for yt-dlp
+    format_seconds() {
+        local total_seconds=$1
+        local hours=$((total_seconds / 3600))
+        local minutes=$(((total_seconds % 3600) / 60))
+        local seconds=$((total_seconds % 60))
+        
+        if [[ $hours -gt 0 ]]; then
+            printf "%d:%02d:%02d" $hours $minutes $seconds
+        else
+            printf "%d:%02d" $minutes $seconds
+        fi
+    }
+    
+    DOWNLOAD_START_TS=$(format_seconds $DOWNLOAD_START)
+    DOWNLOAD_END_TS=$(format_seconds $DOWNLOAD_END)
+fi
+
+# Main extraction logic - using the proven working method
+if [[ "$CLIP_MODE" == true ]]; then
+    print_info "Extracting audio segment ($START_TIME to $END_TIME)..."
+    
+    # Use yt-dlp with external downloader for precise extraction
+    if yt-dlp --quiet --no-warnings \
+        "${COOKIE_ARGS[@]}" \
+        --external-downloader ffmpeg \
+        --external-downloader-args "ffmpeg_i:-ss $START_TIME -t $DURATION" \
+        -x --audio-format mp3 --audio-quality "${BITRATE%k}" \
+        "$URL" -o "$FULL_OUTPUT_PATH" 2>/dev/null; then
+        
+        print_success "Audio segment extracted successfully!"
+        
+        # Apply fade effects if needed
+        if [[ "$FADE_IN" != "0" ]] || [[ "$FADE_OUT" != "0" ]]; then
+            print_info "Applying fade effects..."
+            TEMP_FADED=$(mktemp)"_faded.mp3"
+            
+            # Build fade filter
+            FADE_FILTERS=""
+            if [[ "$FADE_IN" != "0" ]]; then
+                FADE_FILTERS="afade=in:d=${FADE_IN}"
+            fi
+            if [[ "$FADE_OUT" != "0" ]]; then
+                FADE_OUT_START=$((DURATION - FADE_OUT))
+                if [[ -n "$FADE_FILTERS" ]]; then
+                    FADE_FILTERS="${FADE_FILTERS},afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
+                else
+                    FADE_FILTERS="afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
+                fi
+            fi
+            
+            if ffmpeg -hide_banner -loglevel error -i "$FULL_OUTPUT_PATH" -af "$FADE_FILTERS" -c:a libmp3lame -b:a "$BITRATE" "$TEMP_FADED" 2>/dev/null; then
+                mv "$TEMP_FADED" "$FULL_OUTPUT_PATH"
+                print_success "Fade effects applied"
+            else
+                rm -f "$TEMP_FADED" 2>/dev/null
+                print_error "Failed to apply fade effects, keeping original"
+            fi
+        fi
     else
-        printf "%d:%02d" $minutes $seconds
+        print_error "Failed to extract audio segment"
+        print_error "This may be due to:"
+        print_error "  1. Video still being processed by YouTube"
+        print_error "  2. Network connectivity issues"
+        print_error "  3. Invalid time range specified"
+        print_error "  4. Video requires authentication (try --cookies-browser chrome)"
+        exit 1
     fi
-}
-
-DOWNLOAD_START_TS=$(format_seconds $DOWNLOAD_START)
-DOWNLOAD_END_TS=$(format_seconds $DOWNLOAD_END)
-
-# Create temp file
-TEMP_FILE=$(mktemp "${TMPDIR:-/tmp}/ytclip_XXXXXX.wav")
-
-print_info "Downloading from YouTube ($DOWNLOAD_START_TS to $DOWNLOAD_END_TS)..."
-if ! yt-dlp --quiet --no-warnings \
-    --download-sections "*${DOWNLOAD_START_TS}-${DOWNLOAD_END_TS}" \
-    -x --audio-format wav \
-    "$URL" -o "$TEMP_FILE" 2>/dev/null; then
-    print_error "Failed to download audio from YouTube"
-    exit 1
-fi
-
-print_success "Download complete"
-
-# Build ffmpeg audio filter
-AUDIO_FILTERS=""
-if [[ "$FADE_IN" != "0" ]]; then
-    AUDIO_FILTERS="afade=in:d=${FADE_IN}"
-fi
-
-if [[ "$FADE_OUT" != "0" ]]; then
-    FADE_OUT_START=$((DURATION - FADE_OUT))
-    if [[ -n "$AUDIO_FILTERS" ]]; then
-        AUDIO_FILTERS="${AUDIO_FILTERS},afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
-    else
-        AUDIO_FILTERS="afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
+else
+    # Full video download
+    print_info "Downloading complete video as MP3..."
+    if ! yt-dlp --quiet --no-warnings \
+        "${COOKIE_ARGS[@]}" \
+        -x --audio-format mp3 --audio-quality "${BITRATE%k}" \
+        "$URL" -o "$FULL_OUTPUT_PATH" 2>/dev/null; then
+        print_error "Failed to download audio from YouTube"
+        exit 1
     fi
 fi
 
-# Extract precise clip with ffmpeg
-print_info "Extracting clip (${START_TIME} to ${END_TIME})..."
-
-FFMPEG_CMD=(ffmpeg -hide_banner -loglevel error -ss $BUFFER_ADJUSTMENT -t $DURATION -i "$TEMP_FILE")
-
-if [[ -n "$AUDIO_FILTERS" ]]; then
-    FFMPEG_CMD+=(-af "$AUDIO_FILTERS")
-fi
-
-FFMPEG_CMD+=(-ab "$BITRATE" -y "$FULL_OUTPUT_PATH")
-
-if ! "${FFMPEG_CMD[@]}"; then
-    print_error "Failed to process audio with ffmpeg"
-    exit 1
-fi
-
-print_success "Clip extracted successfully!"
+print_success "Processing complete!"
 
 # Print summary
 echo ""
 echo "📄 Output file: $FULL_OUTPUT_PATH"
-echo "⏱  Duration: ${DURATION} seconds"
-echo "🎵 Bitrate: $BITRATE"
-if [[ "$FADE_IN" != "0" ]] || [[ "$FADE_OUT" != "0" ]]; then
-    echo "🎚  Fade: ${FADE_IN}s in, ${FADE_OUT}s out"
+if [[ "$CLIP_MODE" == true ]]; then
+    echo "⏱  Duration: ${DURATION} seconds"
+    echo "🎵 Bitrate: $BITRATE"
+    if [[ "$FADE_IN" != "0" ]] || [[ "$FADE_OUT" != "0" ]]; then
+        echo "🎚  Fade: ${FADE_IN}s in, ${FADE_OUT}s out"
+    fi
+else
+    echo "🎵 Bitrate: $BITRATE"
+    echo "📺 Mode: Full video download"
 fi
 
 # Get file size
