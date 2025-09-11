@@ -1,0 +1,327 @@
+#!/usr/bin/env zsh
+# ytclip - Extract precise audio clips from YouTube videos
+# Author: Custom script for extracting audio clips with fade effects
+# Version: 1.0.0
+
+set -euo pipefail
+
+# Default values
+BITRATE="128k"
+FADE_IN="2"
+FADE_OUT="2"
+OUTPUT_DIR="."
+BUFFER_SECONDS=10
+CLEANUP=true
+
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Function to display help
+show_help() {
+    cat << EOF
+ytclip - Extract precise audio clips from YouTube videos
+
+USAGE:
+    ytclip URL START END [OPTIONS]
+    ytclip --help
+
+ARGUMENTS:
+    URL                YouTube video URL
+    START              Start timestamp (format: MM:SS or HH:MM:SS)
+    END                End timestamp (format: MM:SS or HH:MM:SS)
+
+OPTIONS:
+    -o, --output NAME  Output filename (default: generated from video title)
+    -d, --dir DIR      Output directory (default: current directory)
+    -b, --bitrate BR   MP3 bitrate in kbps (default: 128)
+    -f, --fade-in SEC  Fade in duration in seconds (default: 2)
+    -F, --fade-out SEC Fade out duration in seconds (default: 2)
+    --no-fade          Disable both fade effects
+    --keep-temp        Keep temporary files (for debugging)
+    -h, --help         Show this help message
+
+EXAMPLES:
+    # Basic usage with timestamps
+    ytclip "https://youtube.com/watch?v=..." 2:40 3:20
+
+    # Custom output name and bitrate
+    ytclip "https://youtube.com/watch?v=..." 1:30 2:45 -o "my_clip.mp3" -b 192
+
+    # No fade effects, custom directory
+    ytclip "https://youtube.com/watch?v=..." 0:45 1:30 --no-fade -d ~/Music/clips
+
+    # Longer fade effects
+    ytclip "https://youtube.com/watch?v=..." 2:00 4:00 -f 3 -F 5
+
+NOTES:
+    - The script downloads a wider section to handle YouTube's segment boundaries,
+      then uses ffmpeg for precise cutting at the exact timestamps you specify.
+    - Requires yt-dlp and ffmpeg to be installed.
+    - Output format is MP3 with configurable bitrate.
+
+EOF
+}
+
+# Function to print colored messages
+print_error() {
+    echo -e "${RED}ERROR: $1${NC}" >&2
+}
+
+print_success() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+print_info() {
+    echo -e "${YELLOW}→ $1${NC}"
+}
+
+# Function to check dependencies
+check_dependencies() {
+    local deps_missing=false
+    
+    if ! command -v yt-dlp &> /dev/null; then
+        print_error "yt-dlp is not installed. Install with: brew install yt-dlp"
+        deps_missing=true
+    fi
+    
+    if ! command -v ffmpeg &> /dev/null; then
+        print_error "ffmpeg is not installed. Install with: brew install ffmpeg"
+        deps_missing=true
+    fi
+    
+    if [[ "$deps_missing" == true ]]; then
+        exit 1
+    fi
+}
+
+# Function to convert timestamp to seconds
+timestamp_to_seconds() {
+    local ts="$1"
+    local parts=(${(s/:/)ts})
+    local seconds=0
+    
+    if [[ ${#parts[@]} -eq 2 ]]; then
+        # MM:SS format
+        seconds=$((${parts[1]} * 60 + ${parts[2]}))
+    elif [[ ${#parts[@]} -eq 3 ]]; then
+        # HH:MM:SS format
+        seconds=$((${parts[1]} * 3600 + ${parts[2]} * 60 + ${parts[3]}))
+    else
+        print_error "Invalid timestamp format: $ts (use MM:SS or HH:MM:SS)"
+        exit 1
+    fi
+    
+    echo $seconds
+}
+
+# Function to clean up temp files
+cleanup() {
+    if [[ "$CLEANUP" == true ]] && [[ -n "${TEMP_FILE:-}" ]] && [[ -f "$TEMP_FILE" ]]; then
+        print_info "Cleaning up temporary files..."
+        rm -f "$TEMP_FILE"
+    fi
+}
+
+# Set up trap for cleanup
+trap cleanup EXIT INT TERM
+
+# Parse arguments
+if [[ $# -lt 1 ]]; then
+    show_help
+    exit 1
+fi
+
+if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
+    show_help
+    exit 0
+fi
+
+if [[ $# -lt 3 ]]; then
+    print_error "Missing required arguments"
+    echo "Usage: ytclip URL START END [OPTIONS]"
+    echo "Try 'ytclip --help' for more information."
+    exit 1
+fi
+
+URL="$1"
+START_TIME="$2"
+END_TIME="$3"
+shift 3
+
+OUTPUT_FILE=""
+
+# Parse optional arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o|--output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        -d|--dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        -b|--bitrate)
+            BITRATE="${2}k"
+            shift 2
+            ;;
+        -f|--fade-in)
+            FADE_IN="$2"
+            shift 2
+            ;;
+        -F|--fade-out)
+            FADE_OUT="$2"
+            shift 2
+            ;;
+        --no-fade)
+            FADE_IN="0"
+            FADE_OUT="0"
+            shift
+            ;;
+        --keep-temp)
+            CLEANUP=false
+            shift
+            ;;
+        *)
+            print_error "Unknown option: $1"
+            echo "Try 'ytclip --help' for more information."
+            exit 1
+            ;;
+    esac
+done
+
+# Check dependencies
+check_dependencies
+
+# Validate URL
+if [[ ! "$URL" =~ ^https?://(www\.)?(youtube\.com/(watch\?.*v=|live/|embed/|v/|shorts/)|youtu\.be/) ]]; then
+    print_error "Invalid YouTube URL format"
+    exit 1
+fi
+
+# Convert timestamps to seconds
+START_SEC=$(timestamp_to_seconds "$START_TIME")
+END_SEC=$(timestamp_to_seconds "$END_TIME")
+DURATION=$((END_SEC - START_SEC))
+
+if [[ $DURATION -le 0 ]]; then
+    print_error "End time must be after start time"
+    exit 1
+fi
+
+# Validate fade durations
+if [[ $(($FADE_IN + $FADE_OUT)) -ge $DURATION ]]; then
+    print_error "Combined fade durations exceed clip duration"
+    exit 1
+fi
+
+# Create output directory if needed
+if [[ ! -d "$OUTPUT_DIR" ]]; then
+    mkdir -p "$OUTPUT_DIR"
+fi
+
+# Get video title if output name not specified
+if [[ -z "$OUTPUT_FILE" ]]; then
+    print_info "Fetching video title..."
+    VIDEO_TITLE=$(yt-dlp --get-title "$URL" 2>/dev/null | tr '/\\:*?"<>|' '_' | tr ' ' '_')
+    OUTPUT_FILE="${VIDEO_TITLE}_${START_TIME//:/}-${END_TIME//:/}.mp3"
+fi
+
+# Ensure .mp3 extension
+if [[ ! "$OUTPUT_FILE" =~ \.mp3$ ]]; then
+    OUTPUT_FILE="${OUTPUT_FILE}.mp3"
+fi
+
+FULL_OUTPUT_PATH="${OUTPUT_DIR}/${OUTPUT_FILE}"
+
+# Calculate download range with buffer
+DOWNLOAD_START=$((START_SEC - BUFFER_SECONDS))
+if [[ $DOWNLOAD_START -lt 0 ]]; then
+    DOWNLOAD_START=0
+    BUFFER_ADJUSTMENT=$START_SEC
+else
+    BUFFER_ADJUSTMENT=$BUFFER_SECONDS
+fi
+DOWNLOAD_END=$((END_SEC + BUFFER_SECONDS))
+
+# Convert back to timestamp format for yt-dlp
+format_seconds() {
+    local total_seconds=$1
+    local hours=$((total_seconds / 3600))
+    local minutes=$(((total_seconds % 3600) / 60))
+    local seconds=$((total_seconds % 60))
+    
+    if [[ $hours -gt 0 ]]; then
+        printf "%d:%02d:%02d" $hours $minutes $seconds
+    else
+        printf "%d:%02d" $minutes $seconds
+    fi
+}
+
+DOWNLOAD_START_TS=$(format_seconds $DOWNLOAD_START)
+DOWNLOAD_END_TS=$(format_seconds $DOWNLOAD_END)
+
+# Create temp file
+TEMP_FILE=$(mktemp "${TMPDIR:-/tmp}/ytclip_XXXXXX.wav")
+
+print_info "Downloading from YouTube ($DOWNLOAD_START_TS to $DOWNLOAD_END_TS)..."
+if ! yt-dlp --quiet --no-warnings \
+    --download-sections "*${DOWNLOAD_START_TS}-${DOWNLOAD_END_TS}" \
+    -x --audio-format wav \
+    "$URL" -o "$TEMP_FILE" 2>/dev/null; then
+    print_error "Failed to download audio from YouTube"
+    exit 1
+fi
+
+print_success "Download complete"
+
+# Build ffmpeg audio filter
+AUDIO_FILTERS=""
+if [[ "$FADE_IN" != "0" ]]; then
+    AUDIO_FILTERS="afade=in:d=${FADE_IN}"
+fi
+
+if [[ "$FADE_OUT" != "0" ]]; then
+    FADE_OUT_START=$((DURATION - FADE_OUT))
+    if [[ -n "$AUDIO_FILTERS" ]]; then
+        AUDIO_FILTERS="${AUDIO_FILTERS},afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
+    else
+        AUDIO_FILTERS="afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
+    fi
+fi
+
+# Extract precise clip with ffmpeg
+print_info "Extracting clip (${START_TIME} to ${END_TIME})..."
+
+FFMPEG_CMD=(ffmpeg -hide_banner -loglevel error -ss $BUFFER_ADJUSTMENT -t $DURATION -i "$TEMP_FILE")
+
+if [[ -n "$AUDIO_FILTERS" ]]; then
+    FFMPEG_CMD+=(-af "$AUDIO_FILTERS")
+fi
+
+FFMPEG_CMD+=(-ab "$BITRATE" -y "$FULL_OUTPUT_PATH")
+
+if ! "${FFMPEG_CMD[@]}"; then
+    print_error "Failed to process audio with ffmpeg"
+    exit 1
+fi
+
+print_success "Clip extracted successfully!"
+
+# Print summary
+echo ""
+echo "📄 Output file: $FULL_OUTPUT_PATH"
+echo "⏱  Duration: ${DURATION} seconds"
+echo "🎵 Bitrate: $BITRATE"
+if [[ "$FADE_IN" != "0" ]] || [[ "$FADE_OUT" != "0" ]]; then
+    echo "🎚  Fade: ${FADE_IN}s in, ${FADE_OUT}s out"
+fi
+
+# Get file size
+if [[ -f "$FULL_OUTPUT_PATH" ]]; then
+    FILE_SIZE=$(du -h "$FULL_OUTPUT_PATH" | cut -f1)
+    echo "💾 File size: $FILE_SIZE"
+fi
