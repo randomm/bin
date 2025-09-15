@@ -1,7 +1,8 @@
 #!/usr/bin/env zsh
 # ytclip - Extract precise audio clips from YouTube videos
-# Author: Custom script for extracting audio clips with fade effects
-# Version: 1.0.0
+# Author: Janni Turunen
+# License: MIT
+# Version: 0.2.0
 
 set -euo pipefail
 
@@ -12,6 +13,9 @@ FADE_OUT="2"
 OUTPUT_DIR="."
 BUFFER_SECONDS=10
 CLEANUP=true
+TEMP_FADED_BASE=""
+OUTPUT_BASENAME=""
+OUTPUT_DIRNAME=""
 
 # Color codes for output
 RED='\033[0;31m'
@@ -122,6 +126,20 @@ timestamp_to_seconds() {
     echo $seconds
 }
 
+# Function to convert seconds to timestamp format
+format_seconds() {
+    local total_seconds=$1
+    local hours=$((total_seconds / 3600))
+    local minutes=$(((total_seconds % 3600) / 60))
+    local seconds=$((total_seconds % 60))
+    
+    if [[ $hours -gt 0 ]]; then
+        printf "%d:%02d:%02d" $hours $minutes $seconds
+    else
+        printf "%d:%02d" $minutes $seconds
+    fi
+}
+
 # Function to sanitize filename
 sanitize_filename() {
     local filename="$1"
@@ -182,14 +200,53 @@ sanitize_filename() {
 
 # Function to clean up temp files
 cleanup() {
-    if [[ "$CLEANUP" == true ]] && [[ -n "${TEMP_FILE:-}" ]] && [[ -f "$TEMP_FILE" ]]; then
+    if [[ "$CLEANUP" == true ]]; then
         print_info "Cleaning up temporary files..."
-        rm -f "$TEMP_FILE"
+        
+        # Clean up any temporary files that might have been created
+        if [[ -n "${TEMP_FADED_BASE:-}" ]]; then
+            rm -f "$TEMP_FADED_BASE" "${TEMP_FADED_BASE}_faded.mp3"
+        fi
+        
+        # Clean up potential temporary files from previous runs
+        if [[ -n "${TEMP_BASE:-}" ]]; then
+            rm -f "${TEMP_BASE}.mp3" "${TEMP_BASE}.m4a" "${TEMP_BASE}.webm" "${TEMP_BASE}.mp4" \
+                  "${TEMP_BASE}.mp3.part" "${TEMP_BASE}.m4a.part" "${TEMP_BASE}.webm.part" "${TEMP_BASE}.mp4.part" \
+                  "${TEMP_BASE}.mp3.ytdl" "${TEMP_BASE}.m4a.ytdl" "${TEMP_BASE}.webm.ytdl" "${TEMP_BASE}.mp4.ytdl"
+        fi
     fi
 }
 
 # Set up trap for cleanup
 trap cleanup EXIT INT TERM
+
+# Function to generate unique filename by appending numbers
+generate_unique_filename() {
+    local base_path="$1"
+    local counter=1
+    local new_path="$base_path"
+    
+    # If file exists, try appending numbers until we find a unique name
+    while [[ -f "$new_path" ]]; do
+        # Extract directory, filename, and extension
+        local dir=$(dirname "$base_path")
+        local filename=$(basename "$base_path")
+        local extension=""
+        local name_without_ext="$filename"
+        
+        # Check if file has an extension
+        if [[ "$filename" == *.* ]]; then
+            extension=".${filename##*.}"
+            name_without_ext="${filename%.*}"
+        fi
+        
+        # Generate new filename with counter
+        new_path="${dir}/${name_without_ext}_${counter}${extension}"
+        counter=$((counter + 1))
+    done
+    
+    echo "$new_path"
+}
 
 # Parse arguments
 if [[ $# -lt 1 ]]; then
@@ -299,17 +356,18 @@ if [[ ! "$URL" =~ ^https?://(www\.)?(youtube\.com/(watch\?.*v=|live/|embed/|v/|s
     exit 1
 fi
 
+# Store original URL for live stream detection
+ORIGINAL_URL="$URL"
+
 # Convert live URLs to standard watch URLs for better compatibility  
 if [[ "$URL" =~ "youtube.com/live/" ]]; then
     VIDEO_ID=$(echo "$URL" | sed 's/.*\/live\///; s/[?&].*//')
-    ORIGINAL_URL="$URL"
     URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
     print_info "Converted live stream URL to standard format for better extraction"
     print_info "Original: $ORIGINAL_URL"
     print_info "Using: $URL"
 elif [[ "$URL" =~ "youtu.be/" ]]; then
     VIDEO_ID=$(echo "$URL" | sed 's/.*youtu.be\///; s/[?&].*//')
-    ORIGINAL_URL="$URL"
     URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
     print_info "Converted short URL to standard format"
     print_info "Using: $URL"
@@ -353,10 +411,10 @@ if [[ -z "$OUTPUT_FILE" ]] || [[ "$CLIP_MODE" == false ]]; then
             # Parse duration and convert to seconds for comparison
             if [[ "$VIDEO_DURATION_STR" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
                 # HH:MM:SS format
-                VIDEO_DURATION_SEC=$((${BASH_REMATCH[1]} * 3600 + ${BASH_REMATCH[2]} * 60 + ${BASH_REMATCH[3]}))
+                VIDEO_DURATION_SEC=$((${match[1]} * 3600 + ${match[2]} * 60 + ${match[3]}))
             elif [[ "$VIDEO_DURATION_STR" =~ ^([0-9]+):([0-9]+)$ ]]; then
                 # MM:SS format
-                VIDEO_DURATION_SEC=$((${BASH_REMATCH[1]} * 60 + ${BASH_REMATCH[2]}))
+                VIDEO_DURATION_SEC=$((${match[1]} * 60 + ${match[2]}))
             else
                 VIDEO_DURATION_SEC=0
             fi
@@ -365,12 +423,7 @@ if [[ -z "$OUTPUT_FILE" ]] || [[ "$CLIP_MODE" == false ]]; then
             if [[ $VIDEO_DURATION_SEC -gt 1800 ]]; then
                 echo -e "${YELLOW}⚠️  Warning: This video is ${VIDEO_DURATION_STR} long and will take significant time to download.${NC}"
                 echo -e "${YELLOW}   Consider specifying start/end timestamps to extract just the segment you need.${NC}"
-                echo -n "Continue with full video download? [y/N]: "
-                read -r response
-                if [[ ! "$response" =~ ^[Yy]$ ]]; then
-                    print_info "Download cancelled by user."
-                    exit 0
-                fi
+                echo -e "${YELLOW}   Continuing with full video download automatically (no interactive prompts in non-interactive mode).${NC}"
             fi
         fi
     fi
@@ -411,80 +464,112 @@ if [[ "$CLIP_MODE" == true ]]; then
     DOWNLOAD_END=$((END_SEC + BUFFER_SECONDS))
     
     # Convert back to timestamp format for yt-dlp
-    format_seconds() {
-        local total_seconds=$1
-        local hours=$((total_seconds / 3600))
-        local minutes=$(((total_seconds % 3600) / 60))
-        local seconds=$((total_seconds % 60))
-        
-        if [[ $hours -gt 0 ]]; then
-            printf "%d:%02d:%02d" $hours $minutes $seconds
-        else
-            printf "%d:%02d" $minutes $seconds
-        fi
-    }
-    
     DOWNLOAD_START_TS=$(format_seconds $DOWNLOAD_START)
     DOWNLOAD_END_TS=$(format_seconds $DOWNLOAD_END)
 fi
 
-# Main extraction logic - using the proven working method
+
+
+# Main extraction logic
 if [[ "$CLIP_MODE" == true ]]; then
     print_info "Extracting audio segment ($START_TIME to $END_TIME)..."
     
-    # Use yt-dlp with external downloader for precise extraction
+    # Generate unique filename automatically (no user interaction)
+    FULL_OUTPUT_PATH=$(generate_unique_filename "$FULL_OUTPUT_PATH")
+    
+    # Calculate precise duration in seconds for the clip
+    DURATION_SECONDS=$DURATION
+    
+    # Use the PROVEN extraction method with external downloader for precise extraction
+    print_info "Using optimized extraction method..."
+    
+    # Format the timestamps properly with leading zeros if needed
+    FORMATTED_START_TIME=$(printf "%02d:%02d:%02d" $((START_SEC/3600)) $(((START_SEC%3600)/60)) $((START_SEC%60)))
+    FORMATTED_DURATION=$(printf "%02d:%02d:%02d" $((DURATION_SECONDS/3600)) $(((DURATION_SECONDS%3600)/60)) $((DURATION_SECONDS%60)))
+    
     if yt-dlp --quiet --no-warnings \
         "${COOKIE_ARGS[@]}" \
         --external-downloader ffmpeg \
-        --external-downloader-args "ffmpeg_i:-ss $START_TIME -t $DURATION" \
+        --external-downloader-args "ffmpeg_i:-ss $FORMATTED_START_TIME -t $FORMATTED_DURATION" \
         -x --audio-format mp3 --audio-quality "${BITRATE%k}" \
-        "$URL" -o "$FULL_OUTPUT_PATH" 2>/dev/null; then
+        --force-overwrites \
+        "$URL" -o "$FULL_OUTPUT_PATH"; then
         
-        print_success "Audio segment extracted successfully!"
+        # Give a small delay to ensure file is fully written
+        sleep 1
         
-        # Apply fade effects if needed
-        if [[ "$FADE_IN" != "0" ]] || [[ "$FADE_OUT" != "0" ]]; then
-            print_info "Applying fade effects..."
-            TEMP_FADED=$(mktemp)"_faded.mp3"
+        # Verify the output file was created successfully
+        if [[ -f "$FULL_OUTPUT_PATH" ]] && [[ -s "$FULL_OUTPUT_PATH" ]]; then
+            print_success "Audio segment extracted successfully!"
             
-            # Build fade filter
-            FADE_FILTERS=""
-            if [[ "$FADE_IN" != "0" ]]; then
-                FADE_FILTERS="afade=in:d=${FADE_IN}"
-            fi
-            if [[ "$FADE_OUT" != "0" ]]; then
-                FADE_OUT_START=$((DURATION - FADE_OUT))
-                if [[ -n "$FADE_FILTERS" ]]; then
-                    FADE_FILTERS="${FADE_FILTERS},afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
+            # Apply fade effects if needed
+            if [[ "$FADE_IN" != "0" ]] || [[ "$FADE_OUT" != "0" ]]; then
+                print_info "Applying fade effects..."
+                TEMP_FADED_BASE=$(mktemp)
+                TEMP_FADED="${TEMP_FADED_BASE}_faded.mp3"
+                
+                # Build fade filter
+                FADE_FILTERS=""
+                if [[ "$FADE_IN" != "0" ]]; then
+                    FADE_FILTERS="afade=in:d=${FADE_IN}"
+                fi
+                if [[ "$FADE_OUT" != "0" ]]; then
+                    FADE_OUT_START=$((DURATION_SECONDS - FADE_OUT))
+                    if [[ -n "$FADE_FILTERS" ]]; then
+                        FADE_FILTERS="${FADE_FILTERS},afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
+                    else
+                        FADE_FILTERS="afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
+                    fi
+                fi
+                
+                if ffmpeg -nostdin -hide_banner -loglevel error -i "$FULL_OUTPUT_PATH" -af "$FADE_FILTERS" -c:a libmp3lame -b:a "$BITRATE" "$TEMP_FADED" 2>/dev/null; then
+                    # Verify the faded file was created successfully
+                    if [[ -f "$TEMP_FADED" ]] && [[ -s "$TEMP_FADED" ]]; then
+                        mv "$TEMP_FADED" "$FULL_OUTPUT_PATH"
+                        print_success "Fade effects applied"
+                    else
+                        print_error "Failed to create faded output file"
+                        print_error "Keeping original file without fade effects"
+                    fi
+                    rm -f "$TEMP_FADED_BASE" 2>/dev/null
                 else
-                    FADE_FILTERS="afade=out:st=${FADE_OUT_START}:d=${FADE_OUT}"
+                    rm -f "$TEMP_FADED_BASE" "$TEMP_FADED" 2>/dev/null
+                    print_error "Failed to apply fade effects, keeping original"
                 fi
             fi
-            
-            if ffmpeg -hide_banner -loglevel error -i "$FULL_OUTPUT_PATH" -af "$FADE_FILTERS" -c:a libmp3lame -b:a "$BITRATE" "$TEMP_FADED" 2>/dev/null; then
-                mv "$TEMP_FADED" "$FULL_OUTPUT_PATH"
-                print_success "Fade effects applied"
-            else
-                rm -f "$TEMP_FADED" 2>/dev/null
-                print_error "Failed to apply fade effects, keeping original"
-            fi
+        else
+            print_error "Downloaded file does not exist or is empty"
+            print_error "Try: --cookies-browser chrome for unlisted videos"
+            exit 1
         fi
     else
         print_error "Failed to extract audio segment"
-        print_error "This may be due to:"
-        print_error "  1. Video still being processed by YouTube"
-        print_error "  2. Network connectivity issues"
-        print_error "  3. Invalid time range specified"
-        print_error "  4. Video requires authentication (try --cookies-browser chrome)"
+        print_error "Try: --cookies-browser chrome for unlisted videos"
         exit 1
     fi
+
 else
     # Full video download
     print_info "Downloading complete video as MP3..."
-    if ! yt-dlp --quiet --no-warnings \
+    
+    # Generate unique filename automatically (no user interaction)
+    FULL_OUTPUT_PATH=$(generate_unique_filename "$FULL_OUTPUT_PATH")
+    
+    if yt-dlp --quiet --no-warnings \
         "${COOKIE_ARGS[@]}" \
         -x --audio-format mp3 --audio-quality "${BITRATE%k}" \
+        --force-overwrites \
         "$URL" -o "$FULL_OUTPUT_PATH" 2>/dev/null; then
+        # Give a small delay to ensure file is fully written
+        sleep 1
+        # Verify the output file was created successfully
+        if [[ -f "$FULL_OUTPUT_PATH" ]] && [[ -s "$FULL_OUTPUT_PATH" ]]; then
+            print_success "Full video audio extracted successfully!"
+        else
+            print_error "Download completed but output file does not exist or is empty"
+            exit 1
+        fi
+    else
         print_error "Failed to download audio from YouTube"
         exit 1
     fi
