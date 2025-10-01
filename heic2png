@@ -1,0 +1,89 @@
+#!/usr/bin/env zsh
+
+# Convert HEIC images to PNG with 50% resolution reduction
+# Usage: heic2png [file1.heic file2.heic ...] or heic2png (processes all HEIC files in current directory)
+
+set -euo pipefail
+
+# Color output for better readability
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to convert a single HEIC file
+convert_heic() {
+    local input_file="$1"
+    local output_file="${input_file:r}.png"
+
+    if [[ ! -f "$input_file" ]]; then
+        echo -e "${RED}Error: File not found: $input_file${NC}"
+        return 1
+    fi
+
+    # Get original dimensions
+    local original_width=$(sips -g pixelWidth "$input_file" | awk '/pixelWidth:/ {print $2}')
+    local original_height=$(sips -g pixelHeight "$input_file" | awk '/pixelHeight:/ {print $2}')
+    local new_width=$((original_width / 2))
+    local new_height=$((original_height / 2))
+
+    echo -e "${BLUE}Converting: $input_file${NC}"
+    echo "  Original: ${original_width}x${original_height}"
+    echo "  New:      ${new_width}x${new_height}"
+
+    # Convert and resize in one operation
+    if sips -s format png -Z $new_width "$input_file" --out "$output_file" &>/dev/null; then
+        # Get file sizes
+        local original_size=$(stat -f%z "$input_file" 2>/dev/null | awk '{printf "%.1fMB", $1/1024/1024}')
+        local new_size=$(stat -f%z "$output_file" 2>/dev/null | awk '{printf "%.1fMB", $1/1024/1024}')
+
+        echo -e "${GREEN}✓ Success: $output_file ($original_size → $new_size)${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ Failed to convert: $input_file${NC}"
+        return 1
+    fi
+}
+
+# Main logic
+main() {
+    local files=()
+
+    # If arguments provided, use them; otherwise find all HEIC files in current directory
+    if [[ $# -gt 0 ]]; then
+        files=("$@")
+    else
+        # Find all HEIC files (case insensitive)
+        files=(*.heic(N) *.HEIC(N) *.Heic(N))
+
+        if [[ ${#files[@]} -eq 0 ]]; then
+            echo -e "${RED}No HEIC files found in current directory.${NC}"
+            echo "Usage: heic2png [file1.heic file2.heic ...]"
+            exit 1
+        fi
+
+        echo -e "${BLUE}Found ${#files[@]} HEIC file(s) to convert${NC}\n"
+    fi
+
+    local success_count=0
+    local fail_count=0
+
+    # Process each file
+    for file in "${files[@]}"; do
+        if convert_heic "$file"; then
+            ((success_count++))
+        else
+            ((fail_count++))
+        fi
+        echo ""
+    done
+
+    # Summary
+    echo "----------------------------------------"
+    echo -e "${GREEN}Converted: $success_count${NC}"
+    if [[ $fail_count -gt 0 ]]; then
+        echo -e "${RED}Failed: $fail_count${NC}"
+    fi
+}
+
+main "$@"
