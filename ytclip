@@ -402,11 +402,11 @@ fi
 # Get video info if output name not specified or for duration check
 if [[ -z "$OUTPUT_FILE" ]] || [[ "$CLIP_MODE" == false ]]; then
     print_info "Fetching video information..."
-    VIDEO_TITLE_RAW=$(yt-dlp --get-title "$URL" 2>/dev/null)
+    VIDEO_TITLE_RAW=$(yt-dlp --extractor-args "youtube:player_client=default" --get-title "$URL" 2>/dev/null)
     
     # Get video duration to warn about long videos
     if [[ "$CLIP_MODE" == false ]]; then
-        VIDEO_DURATION_STR=$(yt-dlp --get-duration "$URL" 2>/dev/null)
+        VIDEO_DURATION_STR=$(yt-dlp --extractor-args "youtube:player_client=default" --get-duration "$URL" 2>/dev/null)
         if [[ -n "$VIDEO_DURATION_STR" ]]; then
             # Parse duration and convert to seconds for comparison
             if [[ "$VIDEO_DURATION_STR" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
@@ -488,6 +488,7 @@ if [[ "$CLIP_MODE" == true ]]; then
     FORMATTED_DURATION=$(printf "%02d:%02d:%02d" $((DURATION_SECONDS/3600)) $(((DURATION_SECONDS%3600)/60)) $((DURATION_SECONDS%60)))
     
     if yt-dlp --quiet --no-warnings \
+        --extractor-args "youtube:player_client=default" \
         "${COOKIE_ARGS[@]}" \
         --external-downloader ffmpeg \
         --external-downloader-args "ffmpeg_i:-ss $FORMATTED_START_TIME -t $FORMATTED_DURATION" \
@@ -556,6 +557,7 @@ else
     FULL_OUTPUT_PATH=$(generate_unique_filename "$FULL_OUTPUT_PATH")
     
     if yt-dlp --quiet --no-warnings \
+        --extractor-args "youtube:player_client=default" \
         "${COOKIE_ARGS[@]}" \
         -x --audio-format mp3 --audio-quality "${BITRATE%k}" \
         --force-overwrites \
